@@ -3,6 +3,11 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import io
+from openpyxl import Workbook
+from openpyxl.chart import ScatterChart, Reference, Series, BarChart, LineChart
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 # --- 0. 앱 기본 정보 ---
 st.set_page_config(page_title="Analysis System for Polymer Stress Relaxation", layout="wide")
@@ -29,7 +34,190 @@ with st.expander("ℹ️ 앱 사용 가이드 및 이론"):
     st.markdown("- **ε_max**: Load 곡선에서 응력이 0.4 MPa 이하인 변형률을 최대 변형률에서 뺀 후, 그 값의 50%를 최대 변형률에서 뺀 지점(W)에서의 응력(MPa)")
     st.markdown("- **ε_p**: Unload 곡선에서 W 지점 변형률에서의 응력(MPa)")
 
-# --- 1. 데이터 처리 함수들 ---
+# --- Excel 다운로드 함수 ---
+def create_excel_report(analysis_df, all_cycles_data, filename):
+    """Excel 보고서 생성 함수"""
+    output = io.BytesIO()
+    
+    # openpyxl로 직접 워크북 생성
+    wb = Workbook()
+    
+    # 기본 시트 제거
+    wb.remove(wb.active)
+    
+    # 1. 분석 결과 요약 시트
+    summary_ws = wb.create_sheet("Analysis Summary")
+    
+    # 데이터프레임을 시트에 추가
+    for r in dataframe_to_rows(analysis_df, index=False, header=True):
+        summary_ws.append(r)
+    
+    # 헤더 서식
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    
+    for cell in summary_ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    
+    # 열 너비 자동 조정
+    for column in summary_ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 20)
+        summary_ws.column_dimensions[column_letter].width = adjusted_width
+    
+    # 2. 각 사이클별 원본 데이터 시트
+    for cycle_name, cycle_df in all_cycles_data.items():
+        # 시트 이름에서 특수문자 제거
+        safe_sheet_name = cycle_name.replace(' ', '_')[:31]  # Excel 시트명 길이 제한
+        cycle_ws = wb.create_sheet(safe_sheet_name)
+        
+        # 데이터프레임을 시트에 추가
+        for r in dataframe_to_rows(cycle_df, index=False, header=True):
+            cycle_ws.append(r)
+        
+        # 헤더 서식
+        for cell in cycle_ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+    
+    # 3. 전체 히스테리시스 루프 데이터 시트 생성
+    hysteresis_ws = wb.create_sheet('Hysteresis Loops')
+    
+    # 전체 데이터를 하나의 시트에 정리 (각 사이클별로 구분)
+    current_col = 1
+    
+    for cycle_name, cycle_df in all_cycles_data.items():
+        # 사이클 제목 추가
+        hysteresis_ws.cell(row=1, column=current_col, value=f"{cycle_name} - Strain (%)")
+        hysteresis_ws.cell(row=1, column=current_col+1, value=f"{cycle_name} - Stress (MPa)")
+        
+        # 헤더 서식
+        hysteresis_ws.cell(row=1, column=current_col).fill = header_fill
+        hysteresis_ws.cell(row=1, column=current_col).font = header_font
+        hysteresis_ws.cell(row=1, column=current_col+1).fill = header_fill
+        hysteresis_ws.cell(row=1, column=current_col+1).font = header_font
+        
+        # 데이터 추가
+        for idx, (_, row) in enumerate(cycle_df.iterrows(), start=2):
+            hysteresis_ws.cell(row=idx, column=current_col, value=row['Strain'])
+            hysteresis_ws.cell(row=idx, column=current_col+1, value=row['Stress (MPa)'])
+        
+        current_col += 3  # 다음 사이클을 위한 열 공간 확보
+    
+    # 4. 차트용 데이터 시트 생성
+    chart_data = analysis_df[['Cycle', 'Hysteresis Area (MJ/m³)', 'Cumulative Hysteresis (MJ/m³)']].copy()
+    chart_ws = wb.create_sheet('Chart Data')
+    
+    # 차트 데이터를 시트에 추가
+    for r in dataframe_to_rows(chart_data, index=False, header=True):
+        chart_ws.append(r)
+    
+    # 차트 데이터 시트 헤더 서식
+    for cell in chart_ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    
+    # 5. 차트 생성
+    if len(analysis_df) > 0:
+        data_rows = len(analysis_df) + 1  # 헤더 포함
+        
+        # 1. 히스테리시스 면적 막대 차트
+        chart1 = BarChart()
+        chart1.title = "Cycle별 히스테리시스 면적"
+        chart1.x_axis.title = "Cycle"
+        chart1.y_axis.title = "Hysteresis Area (MJ/m³)"
+        chart1.style = 10  # 스타일 설정
+        
+        # 데이터 범위 설정
+        categories = Reference(chart_ws, min_col=1, min_row=2, max_row=data_rows)
+        values1 = Reference(chart_ws, min_col=2, min_row=1, max_row=data_rows)
+        
+        chart1.add_data(values1, titles_from_data=True)
+        chart1.set_categories(categories)
+        chart1.width = 15
+        chart1.height = 10
+        
+        # 차트를 시트에 추가
+        chart_ws.add_chart(chart1, "E2")
+        
+        # 2. 누적 에너지 손실 선 차트
+        chart2 = LineChart()
+        chart2.title = "사이클별 누적 에너지 손실"
+        chart2.x_axis.title = "Cycle"
+        chart2.y_axis.title = "Cumulative Hysteresis (MJ/m³)"
+        chart2.style = 12  # 스타일 설정
+        
+        values2 = Reference(chart_ws, min_col=3, min_row=1, max_row=data_rows)
+        chart2.add_data(values2, titles_from_data=True)
+        chart2.set_categories(categories)
+        chart2.width = 15
+        chart2.height = 10
+        
+        # 차트를 시트에 추가
+        chart_ws.add_chart(chart2, "E20")
+    
+    # 6. 히스테리시스 루프 Scatter 차트 생성
+    if len(all_cycles_data) > 0:
+        # 전체 히스테리시스 루프 scatter 차트
+        scatter_chart = ScatterChart()
+        scatter_chart.title = "전체 히스테리시스 루프"
+        scatter_chart.x_axis.title = "Strain (%)"
+        scatter_chart.y_axis.title = "Stress (MPa)"
+        scatter_chart.style = 13
+        
+        # 각 사이클별로 시리즈 추가
+        current_col = 1
+        colors = ['FF0000', '00FF00', '0000FF', 'FFFF00', 'FF00FF', '00FFFF', '800000', '008000', '000080']
+        
+        for idx, (cycle_name, cycle_df) in enumerate(all_cycles_data.items()):
+            if len(cycle_df) > 0:
+                # 최대 변형률 지점 찾기
+                max_strain_idx = cycle_df['Strain'].idxmax()
+                total_points = len(cycle_df)
+                
+                # 데이터 범위 설정
+                x_values = Reference(hysteresis_ws, min_col=current_col, min_row=2, max_row=total_points+1)
+                y_values = Reference(hysteresis_ws, min_col=current_col+1, min_row=2, max_row=total_points+1)
+                
+                # 시리즈 생성
+                series = Series(y_values, x_values, title=cycle_name)
+                
+                # 색상 설정 (가능한 경우)
+                if idx < len(colors):
+                    try:
+                        # 시리즈 색상 설정은 openpyxl에서 제한적이므로 기본 스타일 사용
+                        pass
+                    except:
+                        pass
+                
+                scatter_chart.series.append(series)
+                current_col += 3
+        
+        scatter_chart.width = 20
+        scatter_chart.height = 15
+        
+        # 히스테리시스 루프 시트에 차트 추가
+        chart_start_col = current_col + 2
+        hysteresis_ws.add_chart(scatter_chart, f"{chr(64 + chart_start_col)}2")
+    
+    # 7. 파일 저장
+    wb.save(output)
+    output.seek(0)
+    
+    return output.getvalue()
+
+# --- 1. 데이터 처리 함수들 (기존과 동일) ---
 @st.cache_data
 def generate_demo_data():
     num_cycles=5
@@ -299,6 +487,27 @@ else:
     
     cycle_names = list(data.keys())
     selected_cycles = st.sidebar.multiselect("보고 싶은 Cycle을 선택하세요:", options=cycle_names, default=cycle_names, key="cycle_selector")
+
+    # === Excel 다운로드 버튼 추가 ===
+    st.sidebar.header("📥 Export Options")
+    
+    if st.sidebar.button("📊 Excel 보고서 다운로드", use_container_width=True, type="secondary"):
+        with st.spinner('Excel 보고서 생성 중...'):
+            try:
+                filename = st.session_state.get('uploaded_file_name', 'Demo_Data').replace('.csv', '')
+                excel_data = create_excel_report(analysis_df, data, filename)
+                
+                st.sidebar.download_button(
+                    label="📥 Excel 파일 다운로드",
+                    data=excel_data,
+                    file_name=f"{filename}_Analysis_Report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                st.sidebar.success("✅ Excel 보고서가 준비되었습니다!")
+                
+            except Exception as e:
+                st.sidebar.error(f"Excel 생성 중 오류: {str(e)}")
 
     if st.sidebar.button("새 파일로 다시 분석하기", use_container_width=True, type="primary"):
         for key in list(st.session_state.keys()):
